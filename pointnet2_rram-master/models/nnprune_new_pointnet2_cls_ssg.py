@@ -1,9 +1,11 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from pointnet2_utils import PointNetSetAbstraction
+from pointnet2_utils import PointNetSetAbstraction, Prune_PointNetSetAbstraction
 from noise_layers import NoiseModule, NoiseConv, NoiseLinear
 from binary_utils import BiLinearLSR, TriLinear, NoiseBiLinear, BiMLP, BiLinear
+
+import torch.nn.utils.prune as prune
 
 
 
@@ -25,26 +27,32 @@ class get_model(NoiseModule):
         # mlp3 = [512, 512, 512]
         # mlp4 = [1024, 1024, 1024, 1024, 1024, 1024]
 
-        if c_prune_rate != 1:
-            mlp1 = [int(c / c_prune_rate) for c in mlp1]
-            mlp2 = [int(c / c_prune_rate) for c in mlp2]
-            mlp3 = [int(c / c_prune_rate) for c in mlp3]
+        #if c_prune_rate != 1:
+            #mlp1 = [int(c / c_prune_rate) for c in mlp1]
+            #mlp2 = [int(c / c_prune_rate) for c in mlp2]
+            #mlp3 = [int(c / c_prune_rate) for c in mlp3]
             # mlp4 = [int(c / c_prune_rate) for c in mlp4]
-        self.sa1 = PointNetSetAbstraction(
-            npoint=512, radius=0.2, nsample=32, in_channel=in_channel, mlp=mlp1, group_all=False, noise=noise, compression=compression)
-        self.sa2 = PointNetSetAbstraction(
-            npoint=128, radius=0.4, nsample=64, in_channel=int(128/c_prune_rate) + 3, mlp=mlp2, group_all=False, noise=noise, compression=compression)
-        self.sa3 = PointNetSetAbstraction(
-            npoint=None, radius=None, nsample=None, in_channel=int(256/c_prune_rate) + 3, mlp=mlp3, group_all=True, noise=noise, compression=compression)
+
+        self.sa1 = Prune_PointNetSetAbstraction(
+            npoint=512, radius=0.2, nsample=32, in_channel=in_channel, mlp=mlp1, group_all=False, noise=noise, compression=compression, c_prune_rate=c_prune_rate)
+        self.sa2 = Prune_PointNetSetAbstraction(
+            npoint=128, radius=0.4, nsample=64, in_channel=128 + 3, mlp=mlp2, group_all=False, noise=noise, compression=compression, c_prune_rate=c_prune_rate)
+        self.sa3 = Prune_PointNetSetAbstraction(
+            npoint=None, radius=None, nsample=None, in_channel=256 + 3, mlp=mlp3, group_all=True, noise=noise, compression=compression, c_prune_rate=c_prune_rate)
+
 
         # try recurrent
         # self.sa4 = PointNetSetAbstraction(
         #     npoint=None, radius=None, nsample=None, in_channel=int(512/c_prune_rate) + 3, mlp=mlp4, group_all=True, noise=noise)
 
         if compression == 'full':
-            self.fc1 = NoiseLinear(int(1024 / c_prune_rate), int(512 / c_prune_rate), noise=noise)
-            self.fc2 = NoiseLinear(int(512 / c_prune_rate), int(256 / c_prune_rate), noise=noise)
-            self.fc3 = nn.Linear(int(256 / c_prune_rate), num_class)
+            #self.fc1 = NoiseLinear(int(1024 / c_prune_rate), int(512 / c_prune_rate), noise=noise)
+            #self.fc2 = NoiseLinear(int(512 / c_prune_rate), int(256 / c_prune_rate), noise=noise)
+            #self.fc3 = nn.Linear(int(256 / c_prune_rate), num_class)
+            self.fc1 = NoiseLinear(1024, 512, noise=noise)
+            self.fc2 = NoiseLinear(512,256, noise=noise)
+            self.fc3 = nn.Linear(256, num_class)
+
         elif compression == 'binary':
             self.fc1 = NoiseBiLinear(int(1024 / c_prune_rate), int(512 / c_prune_rate), binary_act=False, noise=noise)
             self.fc2 = NoiseBiLinear(int(512 / c_prune_rate), int(256 / c_prune_rate), binary_act=False, noise=noise)
@@ -53,9 +61,10 @@ class get_model(NoiseModule):
             self.fc1 = TriLinear(int(1024 / c_prune_rate), int(512 / c_prune_rate))
             self.fc2 = TriLinear(int(512 / c_prune_rate), int(256 / c_prune_rate))
             self.fc3 = TriLinear(int(256 / c_prune_rate), num_class)
-        self.bn1 = nn.BatchNorm1d(int(512 / c_prune_rate))
+
+        self.bn1 = nn.BatchNorm1d(512)
         self.drop1 = nn.Dropout(0.4)
-        self.bn2 = nn.BatchNorm1d(int(256 / c_prune_rate))
+        self.bn2 = nn.BatchNorm1d(256)
         self.drop2 = nn.Dropout(0.4)
 
         self.noise = noise
@@ -84,7 +93,7 @@ class get_model(NoiseModule):
         # try recurrent
         # l3_xyz, l3_points = self.sa4(l3_xyz, l3_points)
 
-        x = l3_points.view(B, int(1024 / self.c_prune_rate))
+        x = l3_points.view(B, 1024)
         x = self.drop1(F.relu(self.bn1(self.fc1(x))))
         x = self.drop2(F.relu(self.bn2(self.fc2(x))))
         x = self.fc3(x)

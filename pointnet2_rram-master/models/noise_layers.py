@@ -132,6 +132,65 @@ class NoiseConv(NoiseModule):
         x_new = x_new.reshape(batch_size, self.out_channels, nsamples, npoints)
         return x_new.to(x.device).detach()
 
+class NoiseConv1(NoiseModule):
+    def __init__(self, in_channels, out_channels, kernel_size=1, sample_noise=False, noise=0):
+        super(NoiseConv1, self).__init__()
+        self.noise = noise
+        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size)
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.sample_noise = sample_noise
+
+    def forward(self, x):
+        if not self.noise:
+            return self.conv(x)
+        else:
+            return self.conv(x) + self.noised_forward(x)
+
+    def noised_inference(self, x):
+        origin_weight = self.conv.weight.squeeze()
+        batch, nsamples, npoints = x.shape[0], x.shape[2], x.shape[3]
+
+        x = x.reshape(batch, self.in_channels, -1, 1).squeeze() # [channel, number of points]
+        x_new = torch.zeros(batch, self.out_channels, x.shape[2], 1).to(x.device)
+        for i in range(batch):
+            noised_weight = self.gen_noise(origin_weight, self.noise).detach()
+
+            x_i = torch.matmul(noised_weight, x[i])
+            x_new[i] = x_i.unsqueeze(-1)
+        del noised_weight, x_i
+        x_new = x_new.reshape(batch, self.out_channels, nsamples, npoints)
+        return x_new.detach()
+
+    def noised_forward(self, x):
+        '''
+        forward propagation with noise
+        '''
+        x = x.detach()
+
+        # x shape: (batch_size, in_features, nsamples, npoints)
+        # n_points: number of centroids.
+        # nsamples: number of points in the neigbor of each centroid.
+        batch_size, in_features, nsamples, npoints = x.size()
+        # x = x.reshape(1, in_features, 1, -1)
+        x = x.reshape(-1, in_features, 1, 1)
+
+        origin_weight = self.conv.weight
+        x_new = torch.zeros(x.shape[0], self.out_channels, 1, 1)
+
+        for i in range(x.shape[0]):
+            noise_weight= self.gen_noise(origin_weight, self.noise).detach()#.suqeeze()# .detach()
+            noise_weight = noise_weight.squeeze()
+            # noise_conv = noise_weight
+            # del noise_weight
+            x_i = x[i, :, :, :].squeeze(-1)#.unsqueeze(-1)
+            x_i = torch.matmul(noise_weight, x_i)
+            x_new[i, :, :, :] = x_i.unsqueeze(-1)    # (batch_size, out_features)
+            del noise_weight, x_i
+
+        x_new = x_new.reshape(batch_size, self.out_channels, nsamples, npoints)
+        return x_new.to(x.device).detach()
+
 
 class OldNoiseLinear(NoiseModule):
     def __init__(self, in_features, out_features, bias=True, origin_weight=False, noise=0):

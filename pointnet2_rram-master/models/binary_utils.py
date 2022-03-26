@@ -100,7 +100,6 @@ class BinaryQuantizeIdentity(Function):
     def backward(ctx, grad_output):
         input = ctx.saved_tensors
         grad_input = grad_output
-        return grad_input
 
 
 class BinaryQuantizeIRNet(Function):

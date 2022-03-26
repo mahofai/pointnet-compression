@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from pointnet2_utils import PointNetSetAbstraction
 from noise_layers import NoiseModule, NoiseConv, NoiseLinear
+from binary_utils import BiLinearLSR, TriLinear, NoiseBiLinear
 
 
 class get_model(NoiseModule):
@@ -21,33 +22,39 @@ class get_model(NoiseModule):
         # mlp4 = [1024]
         # mlp3 = [512, 512, 512]
         # mlp4 = [1024, 1024, 1024, 1024, 1024, 1024]
-        
+
         if c_prune_rate != 1:
             mlp1 = [int(c / c_prune_rate) for c in mlp1]
             mlp2 = [int(c / c_prune_rate) for c in mlp2]
             mlp3 = [int(c / c_prune_rate) for c in mlp3]
             # mlp4 = [int(c / c_prune_rate) for c in mlp4]
         self.sa1 = PointNetSetAbstraction(
-            npoint=512, radius=0.2, nsample=32, in_channel=in_channel, mlp=mlp1, group_all=False, noise=noise)
+            npoint=512, radius=0.2, nsample=32, in_channel=in_channel, mlp=mlp1, group_all=False, noise=noise, compression=compression)
         self.sa2 = PointNetSetAbstraction(
-            npoint=128, radius=0.4, nsample=64, in_channel=int(128/c_prune_rate) + 3, mlp=mlp2, group_all=False, noise=noise)
+            npoint=128, radius=0.4, nsample=64, in_channel=int(128/c_prune_rate) + 3, mlp=mlp2, group_all=False, noise=noise, compression=compression)
         self.sa3 = PointNetSetAbstraction(
-            npoint=None, radius=None, nsample=None, in_channel=int(256/c_prune_rate) + 3, mlp=mlp3, group_all=True, noise=noise)
-        
+            npoint=None, radius=None, nsample=None, in_channel=int(256/c_prune_rate) + 3, mlp=mlp3, group_all=True, noise=noise, compression=compression)
+
         # try recurrent
         # self.sa4 = PointNetSetAbstraction(
         #     npoint=None, radius=None, nsample=None, in_channel=int(512/c_prune_rate) + 3, mlp=mlp4, group_all=True, noise=noise)
 
-        # self.fc1 = nn.Linear(int(1024 / c_prune_rate), int(512 / c_prune_rate))
-        self.fc1 = NoiseLinear(int(1024 / c_prune_rate), int(512 / c_prune_rate), noise=noise)
+        if compression == 'full':
+            self.fc1 = NoiseLinear(int(1024 / c_prune_rate), int(512 / c_prune_rate), noise=noise)
+            self.fc2 = NoiseLinear(int(512 / c_prune_rate), int(256 / c_prune_rate), noise=noise)
+            self.fc3 = nn.Linear(int(256 / c_prune_rate), num_class)
+        elif compression == 'binary':
+            self.fc1 = NoiseBiLinear(int(1024 / c_prune_rate), int(512 / c_prune_rate), binary_act=True, noise=noise)
+            self.fc2 = NoiseBiLinear(int(512 / c_prune_rate), int(256 / c_prune_rate), binary_act=True, noise=noise)
+            self.fc3 = NoiseBiLinear(int(256 / c_prune_rate), num_class, binary_act=True, noise=noise)
+        elif compression == 'ternary':
+            self.fc1 = TriLinear(int(1024 / c_prune_rate), int(512 / c_prune_rate))
+            self.fc2 = TriLinear(int(512 / c_prune_rate), int(256 / c_prune_rate))
+            self.fc3 = TriLinear(int(256 / c_prune_rate), num_class)
         self.bn1 = nn.BatchNorm1d(int(512 / c_prune_rate))
         self.drop1 = nn.Dropout(0.4)
-        # self.fc2 = nn.Linear(int(512 / c_prune_rate), int(256 / c_prune_rate))
-        self.fc2 = NoiseLinear(int(512 / c_prune_rate), int(256 / c_prune_rate), noise=noise)
         self.bn2 = nn.BatchNorm1d(int(256 / c_prune_rate))
         self.drop2 = nn.Dropout(0.4)
-        # self.fc3 = nn.Linear(int(256 / c_prune_rate), num_class)
-        self.fc3 = NoiseLinear(int(256 / c_prune_rate), num_class, noise=noise)
 
         self.noise = noise
         self.c_prune_rate = c_prune_rate

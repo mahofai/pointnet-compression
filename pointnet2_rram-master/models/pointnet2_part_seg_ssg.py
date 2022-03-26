@@ -5,7 +5,7 @@ from models.pointnet2_utils import PointNetSetAbstraction,PointNetFeaturePropaga
 
 
 class get_model(nn.Module):
-    def __init__(self, num_classes, normal_channel=False):
+    def __init__(self, num_classes, normal_channel=False,c_prune_rate=1, noise=0):
         super(get_model, self).__init__()
         if normal_channel:
             additional_channel = 3

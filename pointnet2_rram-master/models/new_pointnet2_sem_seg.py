@@ -2,11 +2,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from models.pointnet2_utils import PointNetSetAbstraction,PointNetFeaturePropagation
 from noise_layers import NoiseModule, NoiseConv, NoiseLinear
-from binary_utils import BiLinearLSR, TriLinear, NoiseBiLinear, BiMLP, BiLinear,BiConv1d
+from binary_utils import BiLinearLSR, TriLinear, NoiseBiLinear
 
 
-class get_model(nn.Module):
-    def __init__(self, num_classes, c_prune_rate=1, noise=0, compression='full'):
+class get_model(NoiseModule):
+    def __init__(self, num_classes, c_prune_rate=4, noise=0,compression='full'):
         super(get_model, self).__init__()
         mlp1 = [32, 32, 64]
         mlp2 = [64, 64, 128]
@@ -19,35 +19,27 @@ class get_model(nn.Module):
             mlp4 = [int(c / c_prune_rate) for c in mlp4] 
 
         self.sa1 = PointNetSetAbstraction(1024, 0.1, 32, 9 + 3, mlp1, False)
-        self.sa2 = PointNetSetAbstraction(256, 0.2, 32, int(64/c_prune_rate) + 3, mlp2, False, noise=noise)
-        self.sa3 = PointNetSetAbstraction(64, 0.4, 32, int(128/c_prune_rate) + 3, mlp3, False, noise=noise)
-        self.sa4 = PointNetSetAbstraction(16, 0.8, 32, int(256/c_prune_rate) + 3, mlp4, False, noise=noise)
+        self.sa2 = PointNetSetAbstraction(256, 0.2, 32, int(64/c_prune_rate) + 3, mlp2, False, noise=noise,compression=compression)
+        self.sa3 = PointNetSetAbstraction(64, 0.4, 32, int(128/c_prune_rate) + 3, mlp3, False, noise=noise,compression=compression)
+        self.sa4 = PointNetSetAbstraction(16, 0.8, 32, int(256/c_prune_rate) + 3, mlp4, False, noise=noise,compression=compression)
+
+        if compression == 'full':
+            self.fc1 = NoiseLinear(int(1024 / c_prune_rate), int(512 / c_prune_rate), noise=noise)
+            self.fc2 = NoiseLinear(int(512 / c_prune_rate), int(256 / c_prune_rate), noise=noise)
+            self.fc3 = nn.Linear(int(256 / c_prune_rate), num_classes)
+
         self.fp4 = PointNetFeaturePropagation( int(768 / c_prune_rate), [int(256 / c_prune_rate), int(256 / c_prune_rate)])
         self.fp3 = PointNetFeaturePropagation( int(384 / c_prune_rate), [int(256 / c_prune_rate), int(256 / c_prune_rate)])
         self.fp2 = PointNetFeaturePropagation( int(320 / c_prune_rate), [int(256 / c_prune_rate), int(128 / c_prune_rate)])
         self.fp1 = PointNetFeaturePropagation( int(128 / c_prune_rate), [int(128 / c_prune_rate), int(128 / c_prune_rate), int(128 / c_prune_rate)])
-
-
-        if compression == 'full':
-            self.conv1 = nn.Conv1d(int(128 / c_prune_rate), int(128 / c_prune_rate), 1)
-            self.conv2 = nn.Conv1d(int(128 / c_prune_rate), num_classes, 1)
-
-        elif compression == 'binary':
-            self.conv1 = BiConv1d(int(128 / c_prune_rate), int(128 / c_prune_rate), 1)
-            self.conv2 = BiConv1d(int(128 / c_prune_rate), num_classes, 1)
-
-        elif compression == 'ternary':
-            self.conv1 = TriLinear(int(128 / c_prune_rate), int(128 / c_prune_rate))
-            self.conv2 = TriLinear(int(128 / c_prune_rate), num_classes)
-
-        #self.conv1 = nn.Conv1d(int(128 / c_prune_rate), int(128 / c_prune_rate), 1)
+        
+        self.conv1 = nn.Conv1d(int(128 / c_prune_rate), int(128 / c_prune_rate), 1)
         self.bn1 = nn.BatchNorm1d(int(128 / c_prune_rate))
         self.drop1 = nn.Dropout(0.5)
-        #self.conv2 = nn.Conv1d(int(128 / c_prune_rate), num_classes, 1)
+        self.conv2 = nn.Conv1d(int(128 / c_prune_rate), num_classes, 1)
 
-
-        self.noise = noise
         self.c_prune_rate = c_prune_rate
+        self.noise = noise
 
     def forward(self, xyz):
         l0_points = xyz
