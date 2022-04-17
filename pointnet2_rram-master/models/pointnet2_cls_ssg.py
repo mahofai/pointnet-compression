@@ -6,7 +6,7 @@ from noise_layers import NoiseModule, NoiseConv, NoiseLinear
 
 
 class get_model(NoiseModule):
-    def __init__(self, num_class, normal_channel=True, c_prune_rate=1, noise=0, compression='full'):
+    def __init__(self, num_class, normal_channel=True, c_prune_rate=1, noise=0, compression='full',bilinear='BiLinear'):
         super(get_model, self).__init__()
         in_channel = 6 if normal_channel else 3
         self.normal_channel = normal_channel

@@ -7,6 +7,12 @@ import numpy as np
 import torch.nn.functional as F
 from noise_layers import NoiseModule, NoiseConv, NoiseLinear
 
+offset_map = {
+    1024: -3.2041,
+    2048: -3.4025,
+    4096: -3.5836
+}
+
 
 class STN3d(nn.Module):
     def __init__(self, channel, c_prune_rate=1):
@@ -45,7 +51,7 @@ class STN3d(nn.Module):
         batchsize = x.size()[0]
         x = F.relu(self.bn1(self.conv1(x)))
         x = F.relu(self.bn2(self.conv2(x)))
-        x = F.relu(self.bn3(self.conv3(x)))
+        x = F.relu(self.bn3(self.conv3(x)))+ offset_map[N]
         x = torch.max(x, 2, keepdim=True)[0]
         #x = x.view(-1, 1024)
         x = x.view(-1, int(1024/self.c_prune_rate))

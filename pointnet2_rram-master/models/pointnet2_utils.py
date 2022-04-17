@@ -6,9 +6,35 @@ import numpy as np
 
 import torch.nn.utils.prune as prune
 
-from noise_layers import NoiseModule, NoiseConv, NoiseConv1
-from binary_utils import BiConv2dLSR, BiLinearLSR, TriConv2d, TriLinear, NoiseBiConv2dLSR, BiConv1d
+from models.noise_layers import NoiseModule, NoiseConv, NoiseConv1d
+from models.binary_utils import NoiseBiLinear,NoiseBiLinearLSR,TriConv2d, BiConv2dLSR, BiLinearLSR, NoiseTriConv2d, NoiseTriConv2dLSR, NoiseTriLinear, NoiseTriLinearLSR, NoiseBiConv2dLSR, BiLinearXNOR, BiConv2d, BiConv2dXNOR, NoiseTriConv1d,NoiseTriConv1dLSR, BiConv1dLSR, NoiseBiConv1dLSR,NoiseBiConv1d
+from models.kmeans import KmeansConv, KmeansConv1d
+offset_map = {
+  64: -2.2983,
+  1024: -3.2041
+}
 
+class Conv1dLSR(nn.Module):
+    def __init__(self, inplane, outplane):
+        super().__init__()
+        self.lin = NoiseBiLinearLSR(inplane, outplane)
+
+    def forward(self, x):
+        B, C, N = x.shape
+        x = x.permute(0, 2, 1).contiguous().view(-1, C)
+        x = self.lin(x).view(B, N, -1).permute(0, 2, 1).contiguous()
+        return x
+
+class Conv1d(nn.Module):
+    def __init__(self, inplane, outplane):
+        super().__init__()
+        self.lin = NoiseBiLinear(inplane, outplane)
+
+    def forward(self, x):
+        B, C, N = x.shape
+        x = x.permute(0, 2, 1).contiguous().view(-1, C)
+        x = self.lin(x).view(B, N, -1).permute(0, 2, 1).contiguous()
+        return x
 
 def timeit(tag, t):
     print("{}: {}s".format(tag, time() - t))
@@ -167,7 +193,7 @@ def sample_and_group_all(xyz, points):
 
 
 class PointNetSetAbstraction(NoiseModule):
-    def __init__(self, npoint, radius, nsample, in_channel, mlp, group_all, noise=0, compression='full'):
+    def __init__(self, npoint, radius, nsample, in_channel, mlp, group_all, noise=0, compression='full', bilinear='BilinearLSR',bits=1,drop=0,pool='ema-max'):
         super(PointNetSetAbstraction, self).__init__()
         self.npoint = npoint    # number of centroids
         self.radius = radius
@@ -175,19 +201,36 @@ class PointNetSetAbstraction(NoiseModule):
         self.mlp_convs = nn.ModuleList()
         self.mlp_bns = nn.ModuleList()
         last_channel = in_channel
+        print(mlp)
         for out_channel in mlp:
             if compression == 'full':
-                self.mlp_convs.append(NoiseConv(last_channel, out_channel, 1, noise=noise))
-            elif compression == 'binary':
-                self.mlp_convs.append(NoiseBiConv2dLSR(last_channel, out_channel, 1, noise=noise))
+                self.mlp_convs.append(NoiseConv(last_channel, out_channel, 1, noise=noise))          
             elif compression == 'ternary':
-                self.mlp_convs.append(TriConv2d(last_channel, out_channel, 1))
+                self.mlp_convs.append(NoiseTriConv2d(last_channel, out_channel, 1, noise=noise))
+            elif compression == 'ternaryLSR':
+                self.mlp_convs.append(NoiseTriConv2dLSR(last_channel, out_channel, 1, noise=noise))
+            elif compression == 'binary':
+                if bilinear == 'Bilinear':
+                    self.mlp_convs.append(BiConv2d(last_channel, out_channel, 1 ))
+                elif  bilinear == 'BilinearLSR':
+                    print('BiLSR')
+                    self.mlp_convs.append(NoiseBiConv2dLSR(last_channel, out_channel, 1, noise=noise))
+                elif  bilinear == 'BilinearXNOR':
+                    self.mlp_convs.append(BiConv2dXNOR(last_channel, out_channel, 1 ))
+                else:
+                    print(" no matching biconv")
+            elif compression == 'kmeans':
+              print("kmeans")
+              self.mlp_convs.append(KmeansConv(last_channel, out_channel, 1, bits=bits))
             self.mlp_bns.append(nn.BatchNorm2d(out_channel))
+            self.dropAll = nn.Dropout(drop)
             last_channel = out_channel
 
         self.group_all = group_all
-
+        self.compression = compression
         self.noise = noise
+        self.pool = pool 
+        self.drop =drop
 
     def forward(self, xyz, points):
         """
@@ -218,15 +261,23 @@ class PointNetSetAbstraction(NoiseModule):
 
         bn = self.mlp_bns[0]
         conv = self.mlp_convs[0]
-        new_points = F.relu(bn(conv(new_points)))
+        new_points = self.dropAll(F.relu(bn(conv(new_points))))
 
         if len(self.mlp_convs) > 1:
+            #print("drop",self.drop)
             for i in range(1, len(self.mlp_convs)):
-                conv = self.mlp_convs[i]
+                conv = self.mlp_convs[1]
+                #conv = self.mlp_convs[i]
                 bn = self.mlp_bns[i]
-                new_points = F.relu(bn(conv(new_points)))
+                new_points = self.dropAll(F.relu(bn(conv(new_points))))
+        if self.pool=='ema-max'and self.compression=='binary':
+            new_points = torch.max(new_points, 2)[0]+offset_map[64]
+        elif self.pool=='ema-max'and self.compression=='ternaryLSR':
+            new_points = torch.max(new_points, 2)[0]+offset_map[64]
+        else:
+            new_points = torch.max(new_points, 2)[0]
 
-        new_points = torch.max(new_points, 2)[0]
+        #new_points = torch.max(new_points, 2)[0] 
         # new_points = torch.mean(new_points, 2)[0]
         new_xyz = new_xyz.permute(0, 2, 1)
         return new_xyz, new_points
@@ -246,7 +297,7 @@ class Prune_PointNetSetAbstraction(NoiseModule):
             elif compression == 'binary':
                 self.mlp_convs.append(NoiseBiConv2dLSR(last_channel, out_channel, 1, noise=noise))
             elif compression == 'ternary':
-                self.mlp_convs.append(TriConv2d(last_channel, out_channel, 1))
+                self.mlp_convs.append(NoiseTriConv2d(last_channel, out_channel, 1))
             self.mlp_bns.append(nn.BatchNorm2d(out_channel))
             last_channel = out_channel
 
@@ -261,7 +312,7 @@ class Prune_PointNetSetAbstraction(NoiseModule):
             prune.ln_structured(module, name="weight", amount=proportion, n=2, dim=0)
             #prune.remove(module, 'weight')
             
-          if isinstance(module, TriConv2d):
+          if isinstance(module, NoiseTriConv2d):
             prune.ln_structured(module, name="weight", amount=proportion, n=2, dim=0)
             #prune.remove(module, 'weight')
             
@@ -376,24 +427,31 @@ class PointNetSetAbstractionMsg(nn.Module):
 
 
 class PointNetFeaturePropagation(nn.Module):
-    def __init__(self, in_channel, mlp,  noise=0, compression='full'):
+    def __init__(self, in_channel, mlp,  noise=0, compression='full',bits=1,drop=0):
         super(PointNetFeaturePropagation, self).__init__()
         self.mlp_convs = nn.ModuleList()
         self.mlp_bns = nn.ModuleList()
         last_channel = in_channel
+        print(mlp)
         for out_channel in mlp:
             if compression == 'full':
-                self.mlp_convs.append(NoiseConv1(last_channel, out_channel, 1, noise=noise))
+                self.mlp_convs.append(NoiseConv1d(last_channel, out_channel, 1, noise=noise))
                 #self.mlp_convs.append(nn.Conv1d(last_channel, out_channel, 1))
             elif compression == 'binary':
-                self.mlp_convs.append(BiConv1d(last_channel, out_channel, 1, noise=noise))
+                print("Conv1d")
+                self.mlp_convs.append(Conv1d(last_channel, out_channel))
             elif compression == 'ternary':
-                self.mlp_convs.append(TriConv2d(last_channel, out_channel, 1))
-
+                self.mlp_convs.append(NoiseTriConv1d(last_channel, out_channel, 1,noise=noise))
+            elif compression == 'ternaryLSR':
+                self.mlp_convs.append(NoiseTriConv1d(last_channel, out_channel, 1,noise=noise))
+            elif compression == 'kmeans':
+                self.mlp_convs.append(KmeansConv1d(last_channel, out_channel, 1, bits=bits,))
+                #self.mlp_convs.append(nn.Conv1d(last_channel, out_channel, 1, ))
             #self.mlp_convs.append(nn.Conv1d(last_channel, out_channel, 1))
 
             self.mlp_bns.append(nn.BatchNorm1d(out_channel))
             last_channel = out_channel
+        self.dropAll=  nn.Dropout(drop)
 
     def forward(self, xyz1, xyz2, points1, points2):
         """
@@ -433,7 +491,5 @@ class PointNetFeaturePropagation(nn.Module):
         new_points = new_points.permute(0, 2, 1)
         for i, conv in enumerate(self.mlp_convs):
             bn = self.mlp_bns[i]
-            new_points = F.relu(bn(conv(new_points)))
+            new_points =  self.dropAll(F.relu(bn(conv(new_points))))
         return new_points
-
-

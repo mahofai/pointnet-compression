@@ -117,7 +117,7 @@ class BinaryQuantizeIRNet(Function):
 
 
 class BiLinearLSR(torch.nn.Linear):
-    def __init__(self, in_features, out_features, bias=False, binary_act=True):
+    def __init__(self, in_features, out_features, bias=True, binary_act=False):
         super(BiLinearLSR, self).__init__(in_features, out_features, bias=bias)
         self.binary_act = binary_act
 
@@ -152,6 +152,8 @@ class BiLinearLSR(torch.nn.Linear):
             ba = BinaryQuantize().apply(ba)
         output = F.linear(ba, bw)
         return output
+
+
 
 
 class BiLinearXNOR(torch.nn.Linear):
@@ -263,19 +265,39 @@ def sparse_matrix_C(nrows, ncols, sparsity, distribution):
     return W
 
 
-class TriLinear(torch.nn.Linear):
-    def __init__(self, in_features, out_features, bias=True, binary_act=True):
-        super(TriLinear, self).__init__(in_features, out_features, bias=bias)
+class NoiseTriLinear(torch.nn.Linear):
+    def __init__(self, in_features, out_features, bias=True, binary_act=False,noise=0):
+        super(NoiseTriLinear, self).__init__(in_features, out_features, bias=bias)
         self.output_ = None
+        self.noise = noise
 
     def forward(self, input):
         tw = self.weight
         ta = input
         tw = TernaryQuantize().apply(tw)
-        output = F.linear(ta, tw, self.bias)
-        self.output_ = output
-        return output
+        #output = F.linear(ta, tw, self.bias)
+        #self.output_ = output
+        #return output
 
+        if not self.noise:
+            output = F.linear(ta, tw, self.bias)
+        else:
+            output = F.linear(ta, tw, self.bias) + self.noised_forward(input, tw)
+        self.output_ = output
+        return output       
+
+    def noised_forward(self, x, w):
+        batch_size, n_points = x.size() 
+        origin_weight = w
+        x_new = torch.zeros(batch_size, self.out_features).to(x.device)
+        
+        for i in range(x.shape[0]):
+            noise_weight = gen_noise(origin_weight, self.noise).detach()   # detach from computational graph
+            x_i = F.linear(x[i,:], noise_weight, self.bias)
+            x_new[i, :] = x_i.squeeze()
+            del noise_weight, x_i
+        
+        return x_new
 
 class BiLinear(torch.nn.Linear):
     def __init__(self, in_features, out_features, bias=True, binary_act=False):
@@ -317,7 +339,7 @@ class NoiseBiLinear(torch.nn.Linear):
         return output
 
     def noised_forward(self, x, w):
-        batch_size, n_points = x.size 
+        batch_size, n_points = x.size() 
         origin_weight = w
         x_new = torch.zeros(batch_size, self.out_features).to(x.device)
         
@@ -328,6 +350,107 @@ class NoiseBiLinear(torch.nn.Linear):
             del noise_weight, x_i
         
         return x_new
+
+class NoiseBiLinearLSR(torch.nn.Linear):
+    def __init__(self, in_features, out_features, bias=True, binary_act=False, noise=0):
+        super(NoiseBiLinearLSR, self).__init__(in_features, out_features, bias=bias)
+        self.binary_act = binary_act
+
+        # must register a nn.Parameter placeholder for model loading
+        # self.register_parameter('scale', None) doesn't register None into state_dict
+        # so it leads to unexpected key error when loading saved model
+        # hence, init scale with Parameter
+        # however, Parameter(None) actually has size [0], not [] as a scalar
+        # hence, init it using the following trick
+        self.register_parameter('scale', Parameter(torch.Tensor([0.0]).squeeze()))
+
+    def reset_scale(self, input):
+        bw = self.weight
+        ba = input
+        bw = bw - bw.mean()
+        self.scale = Parameter((F.linear(ba, bw).std() / F.linear(torch.sign(ba), torch.sign(bw)).std()).float().to(ba.device))
+        # corner case when ba is all 0.0
+        if torch.isnan(self.scale):
+            self.scale = Parameter((bw.std() / torch.sign(bw).std()).float().to(ba.device))
+
+    def forward(self, input):
+        bw = self.weight
+        ba = input
+        bw = bw - bw.mean()
+
+        if self.scale.item() == 0.0:
+            self.reset_scale(input)
+
+        bw = BinaryQuantize().apply(bw)
+        bw = bw * self.scale
+        if self.binary_act:
+            ba = BinaryQuantize().apply(ba)
+        output = F.linear(ba, bw)
+        return output
+
+    def noised_forward(self, x, w):
+        batch_size, n_points = x.size() 
+        origin_weight = w
+        x_new = torch.zeros(batch_size, self.out_features).to(x.device)
+        
+        for i in range(x.shape[0]):
+            noise_weight = gen_noise(origin_weight, self.noise).detach()   # detach from computational graph
+            x_i = F.linear(x[i,:], noise_weight, self.bias)
+            x_new[i, :] = x_i.squeeze()
+            del noise_weight, x_i
+        
+        return x_new
+
+class NoiseTriLinearLSR(torch.nn.Linear):
+    def __init__(self, in_features, out_features, bias=True, binary_act=False, noise=0):
+        super(NoiseTriLinearLSR, self).__init__(in_features, out_features, bias=bias)
+        self.binary_act = binary_act
+
+        # must register a nn.Parameter placeholder for model loading
+        # self.register_parameter('scale', None) doesn't register None into state_dict
+        # so it leads to unexpected key error when loading saved model
+        # hence, init scale with Parameter
+        # however, Parameter(None) actually has size [0], not [] as a scalar
+        # hence, init it using the following trick
+        self.register_parameter('scale', Parameter(torch.Tensor([0.0]).squeeze()))
+
+    def reset_scale(self, input):
+        bw = self.weight
+        ba = input
+        bw = bw - bw.mean()
+        self.scale = Parameter((F.linear(ba, bw).std() / F.linear(torch.sign(ba), torch.sign(bw)).std()).float().to(ba.device))
+        # corner case when ba is all 0.0
+        if torch.isnan(self.scale):
+            self.scale = Parameter((bw.std() / torch.sign(bw).std()).float().to(ba.device))
+
+    def forward(self, input):
+        bw = self.weight
+        ba = input
+        bw = bw - bw.mean()
+
+        if self.scale.item() == 0.0:
+            self.reset_scale(input)
+
+        bw = TernaryQuantize().apply(bw)
+        bw = bw * self.scale
+        if self.binary_act:
+            ba = TernaryQuantize().apply(ba)
+        output = F.linear(ba, bw)
+        return output
+
+    def noised_forward(self, x, w):
+        batch_size, n_points = x.size() 
+        origin_weight = w
+        x_new = torch.zeros(batch_size, self.out_features).to(x.device)
+        
+        for i in range(x.shape[0]):
+            noise_weight = gen_noise(origin_weight, self.noise).detach()   # detach from computational graph
+            x_i = F.linear(x[i,:], noise_weight, self.bias)
+            x_new[i, :] = x_i.squeeze()
+            del noise_weight, x_i
+        
+        return x_new
+
 
 
 biLinears = {
@@ -370,13 +493,14 @@ def FirstBiMLP(channels, batch_norm=True, activation='ReLU', bilinear='BiLinear'
     return Seq(*obj)
 
 
-class BiConv1d(torch.nn.Conv1d):
+class NoiseBiConv1d(torch.nn.Conv1d):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1,
                  padding=0, dilation=1, groups=1,
-                 bias=True, padding_mode='zeros'):
-        super(BiConv1d, self).__init__(
+                 bias=True, padding_mode='zeros',noise=0):
+        super(NoiseBiConv1d, self).__init__(
             in_channels, out_channels, kernel_size, stride, padding, dilation,
             groups, bias, padding_mode)
+        self.noise = noise
 
     def forward(self, input):
 
@@ -391,9 +515,38 @@ class BiConv1d(torch.nn.Conv1d):
             return F.conv1d(F.pad(ba, expanded_padding, mode='circular'),
                             bw, self.bias, self.stride,
                             _single(0), self.dilation, self.groups)
-        return F.conv1d(ba, bw, self.bias, self.stride,
+        output = F.conv1d(ba, bw, self.bias, self.stride,
                         self.padding, self.dilation, self.groups)
+        if self.noise:
+            output = output + self.noised_forward(input, bw,d=1)
 
+        return output    
+
+
+
+class BiConv2d(torch.nn.Conv2d):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1,
+                 padding=0, dilation=1, groups=1,
+                 bias=True, padding_mode='zeros'):
+        super(BiConv2d, self).__init__(
+            in_channels, out_channels, kernel_size, stride, padding, dilation,
+            groups, bias, padding_mode)
+
+    def forward(self, input):
+
+        bw = self.weight
+        ba = input
+        bw = bw - bw.mean()
+        bw = BinaryQuantize().apply(bw)
+        # ba = BinaryQuantize().apply(ba)
+
+        if self.padding_mode == 'circular':
+            expanded_padding = ((self.padding[0] + 1) // 2, self.padding[0] // 2)
+            return F.conv2d(F.pad(ba, expanded_padding, mode='circular'),
+                            bw, self.bias, self.stride,
+                            _single(0), self.dilation, self.groups)
+        return F.conv2d(ba, bw, self.bias, self.stride,
+                        self.padding, self.dilation, self.groups)
 
 class BiConv1dXNOR(torch.nn.Conv1d):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1,
@@ -421,6 +574,35 @@ class BiConv1dXNOR(torch.nn.Conv1d):
                             bw, self.bias, self.stride,
                             _single(0), self.dilation, self.groups)
         return F.conv1d(ba, bw, self.bias, self.stride,
+                        self.padding, self.dilation, self.groups)
+
+class BiConv2dXNOR(torch.nn.Conv2d):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1,
+                 padding=0, dilation=1, groups=1,
+                 bias=True, padding_mode='zeros'):
+        super(BiConv2dXNOR, self).__init__(
+            in_channels, out_channels, kernel_size, stride, padding, dilation,
+            groups, bias, padding_mode)
+
+    def forward(self, input):
+
+        bw = self.weight
+        ba = input
+        bw = bw - bw.mean()
+        # add bw.size(2)
+        sw = bw.abs().view(bw.size(0), bw.size(1),bw.size(2), -1).mean(-1).view(bw.size(0), bw.size(1), bw.size(2), 1).detach()
+        sa = ba.abs().view(ba.size(0), ba.size(1),ba.size(2), -1).mean(-1).view(ba.size(0), ba.size(1), ba.size(2), 1).detach()
+        bw = BinaryQuantize().apply(bw)
+        #ba = BinaryQuantize().apply(ba)
+        bw = bw * sw
+        ba = ba * sa
+
+        if self.padding_mode == 'circular':
+            expanded_padding = ((self.padding[0] + 1) // 2, self.padding[0] // 2)
+            return F.conv2d(F.pad(ba, expanded_padding, mode='circular'),
+                            bw, self.bias, self.stride,
+                            _single(0), self.dilation, self.groups)
+        return F.conv2d(ba, bw, self.bias, self.stride,
                         self.padding, self.dilation, self.groups)
 
 
@@ -469,19 +651,27 @@ class BiConv2dLSR(torch.nn.Conv2d):
                         self.padding, self.dilation, self.groups)
 
 
+
+
 class NoiseBiConv2dLSR(torch.nn.Conv2d):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1,
                  padding=0, dilation=1, groups=1,
-                 bias=True, padding_mode='zeros', noise=0):
+                 bias=True, padding_mode='zeros', noise=0,):
         super(NoiseBiConv2dLSR, self).__init__(
             in_channels, out_channels, kernel_size, stride, padding, dilation,
-            groups, bias, padding_mode)
-        self.register_parameter('scale', None)
+            groups, bias, padding_mode,)
+        
+        #self.register_parameter('scale', None)
         self.noise = noise
         # self.conv = nn.Conv2d(in)
         self.in_channels = in_channels
         self.out_channels = out_channels
         # self.sample_noise = sample_noise
+        self.register_parameter('scale', Parameter(torch.tensor(0.1)))
+
+        
+
+
 
     def reset_scale(self, input):
         bw = self.weight
@@ -504,10 +694,12 @@ class NoiseBiConv2dLSR(torch.nn.Conv2d):
         bw = self.weight
         ba = input
         bw = bw - bw.mean()
-        if self.scale is None:
+        if self.scale is Parameter(torch.tensor(0.1)):
             self.reset_scale(input)
+            #print(self.scale)
         bw = BinaryQuantize().apply(bw)
         # ba = BinaryQuantize().apply(ba)
+        
 
         bw = bw * self.scale
 
@@ -527,13 +719,16 @@ class NoiseBiConv2dLSR(torch.nn.Conv2d):
 
     def noised_forward(self, x, weight):
         x = x.detach()
-
+        #print("x_size",x.size())
         batch_size, in_features, nsamples, npoints = x.size()
-        x = x.reshape(-1, in_features, 1, 1)
+        #x = x.reshape(-1, in_features, 1, 1)
 
         origin_weight = weight
-        x_new = torch.zeros(x.shape[0], self.out_channels, 1, 1)
+        #print("origin_weight",np.shape(origin_weight))
+        x_new = torch.zeros(batch_size,self.out_channels,nsamples, npoints)
+        #print("x_new",np.shape(x_new))
 
+        """
         for i in range(x.shape[0]):
             noise_weight = gen_noise(weight, self.noise).detach()
             noise_weight = noise_weight.squeeze()
@@ -543,14 +738,433 @@ class NoiseBiConv2dLSR(torch.nn.Conv2d):
             x_i = F.conv2d(x_i, weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
             x_new[i, :, :, :] = x_i.squeeze(0)
             del noise_weight, x_i
-        x_new = x_new.reshape(batch_size, self.out_channels, nsamples, npoints)
+        """
+        #weight_list = [npoints]        
+        single_weight = origin_weight.clone().detach()
+        batch_weight = single_weight.repeat(1,1,nsamples, npoints)
+        noise_weight= gen_noise(single_weight, self.noise).detach()
+        #print("noise_weight",np.shape(noise_weight))
+
+        for i in range(batch_size):
+          x_i = x[i, :, :, :]
+          x_i = x_i.unsqueeze(0)
+          #print("x_i",np.shape(x_i))
+          x_i = F.conv2d(x_i, noise_weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
+          x_new[i, :, :, :] = x_i
+          del x_i
+        
+        #print("x_new",np.shape(x_new))
+        del noise_weight
+        #x_new = x_new.reshape(batch_size, self.out_channels, nsamples, npoints)
         return x_new.to(x.device).detach()
 
+class NoiseTriConv2dLSR(torch.nn.Conv2d):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1,
+                 padding=0, dilation=1, groups=1,
+                 bias=True, padding_mode='zeros', noise=0,):
+        super(NoiseTriConv2dLSR, self).__init__(
+            in_channels, out_channels, kernel_size, stride, padding, dilation,
+            groups, bias, padding_mode,)
+        
+        #self.register_parameter('scale', None)
+        self.noise = noise
+        # self.conv = nn.Conv2d(in)
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        # self.sample_noise = sample_noise
+        self.register_parameter('scale', Parameter(torch.tensor(0.1)))
+
+    def reset_scale(self, input):
+        bw = self.weight
+        ba = input
+        bw = bw - bw.mean()
+        if self.padding_mode == 'circular':
+            expanded_padding = ((self.padding[0] + 1) // 2, self.padding[0] // 2)
+            self.scale = Parameter((F.conv1d(F.pad(ba, expanded_padding, mode='circular'),\
+                                  bw, self.bias, self.stride,\
+                                  _single(0), self.dilation, self.groups).std() / \
+                F.conv2d(torch.sign(F.pad(ba, expanded_padding, mode='circular')),\
+                         torch.sign(bw), self.bias, self.stride,\
+                         _single(0), self.dilation, self.groups).std()).float().to(ba.device))
+        else:
+            self.scale = Parameter((F.conv2d(ba, bw, self.bias, self.stride, self.padding, self.dilation, self.groups).std() \
+                                   / F.conv2d(torch.sign(ba), torch.sign(bw), self.bias, self.stride, self.padding, self.dilation, self.groups).std()).float().to(ba.device))
+
+
+    def forward(self, input):
+        bw = self.weight
+        ba = input
+        bw = bw - bw.mean()
+        if self.scale is Parameter(torch.tensor(0.1)):
+            self.reset_scale(input)
+        bw = TernaryQuantize().apply(bw)
+        # ba = BinaryQuantize().apply(ba)
+        
+
+        bw = bw * self.scale
+
+        if self.padding_mode == 'circular':
+            expanded_padding = ((self.padding[0] + 1) // 2, self.padding[0] // 2)
+            output = F.conv2d(F.pad(ba, expanded_padding, mode='circular'),
+                            bw, self.bias, self.stride,
+                            _single(0), self.dilation, self.groups)
+        else:
+            output = F.conv2d(ba, bw, self.bias, self.stride,
+                            self.padding, self.dilation, self.groups)
+
+        if self.noise:
+            output = output + self.noised_forward(input, bw,d=2)
+
+        return output
+
+
+
+
+class NoiseTriConv2d(torch.nn.Conv2d):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1,
+                 padding=0, dilation=1, groups=1,
+                 bias=True, padding_mode='zeros', noise=0):
+        super(NoiseTriConv2d, self).__init__(
+            in_channels, out_channels, kernel_size, stride, padding, dilation,
+            groups, bias, padding_mode)
+        self.noise = noise
+
+    def forward(self, input):
+
+        bw = self.weight
+        ba = input
+        bw = bw - bw.mean()
+        bw = TernaryQuantize().apply(bw)
+        # ba = TernaryQuantize().apply(ba)
+
+        if self.padding_mode == 'circular':
+            expanded_padding = ((self.padding[0] + 1) // 2, self.padding[0] // 2)
+            return F.conv2d(F.pad(ba, expanded_padding, mode='circular'),
+                            bw, self.bias, self.stride,
+                            _single(0), self.dilation, self.groups)
+        else: output = F.conv2d(ba, bw, self.bias, self.stride,
+                        self.padding, self.dilation, self.groups)
+
+        if self.noise:
+            output = output + self.noised_forward(input, bw,d=2)
+
+        return output                        
+
+
+class NoiseTriConv1d(torch.nn.Conv1d):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1,
+                 padding=0, dilation=1, groups=1,
+                 bias=True, padding_mode='zeros', noise=0):
+        super(NoiseTriConv1d, self).__init__(
+            in_channels, out_channels, kernel_size, stride, padding, dilation,
+            groups, bias, padding_mode)
+        self.noise = noise
+
+    def forward(self, input):
+
+        bw = self.weight
+        ba = input
+        bw = bw - bw.mean()
+        bw = TernaryQuantize().apply(bw)
+        # ba = TernaryQuantize().apply(ba)
+
+        if self.padding_mode == 'circular':
+            expanded_padding = ((self.padding[0] + 1) // 2, self.padding[0] // 2)
+            return F.conv1d(F.pad(ba, expanded_padding, mode='circular'),
+                            bw, self.bias, self.stride,
+                            _single(0), self.dilation, self.groups)
+        else: output = F.conv1d(ba, bw, self.bias, self.stride,
+                        self.padding, self.dilation, self.groups)
+        if self.noise:
+            output = output + self.noised_forward(input, bw,d=1)
+
+        return output
+
+  
+
+class BiConv1dLSR(torch.nn.Conv1d):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1,
+                 padding=0, dilation=1, groups=1,
+                 bias=True, padding_mode='zeros'):
+        super(BiConv1dLSR, self).__init__(
+            in_channels, out_channels, kernel_size, stride, padding, dilation,
+            groups, bias, padding_mode)
+        #self.register_parameter('scale', None)
+        self.register_parameter('scale', Parameter(torch.tensor(0.1)))
+
+
+        # self.conv = nn.Conv1d(in)
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        # self.sample_noise = sample_noise
+
+    def reset_scale(self, input):
+        bw = self.weight
+        ba = input
+        bw = bw - bw.mean()
+        if self.padding_mode == 'circular':
+            expanded_padding = ((self.padding[0] + 1) // 2, self.padding[0] // 2)
+            self.scale = Parameter((F.conv1d(F.pad(ba, expanded_padding, mode='circular'),\
+                                  bw, self.bias, self.stride,\
+                                  _single(0), self.dilation, self.groups).std() / \
+                F.conv1d(torch.sign(F.pad(ba, expanded_padding, mode='circular')),\
+                         torch.sign(bw), self.bias, self.stride,\
+                         _single(0), self.dilation, self.groups).std()).float().to(ba.device))
+        else:
+            self.scale = Parameter((F.conv1d(ba, bw, self.bias, self.stride, self.padding, self.dilation, self.groups).std() \
+                                   / F.conv1d(torch.sign(ba), torch.sign(bw), self.bias, self.stride, self.padding, self.dilation, self.groups).std()).float().to(ba.device))
+
+
+    def forward(self, input):
+        bw = self.weight
+        ba = input
+        bw = bw - bw.mean()
+        if self.scale is Parameter(torch.tensor(0.1)):
+            self.reset_scale(input)
+        bw = BinaryQuantize().apply(bw)
+        # ba = BinaryQuantize().apply(ba)
+
+        bw = bw * self.scale
+
+        if self.padding_mode == 'circular':
+            expanded_padding = ((self.padding[0] + 1) // 2, self.padding[0] // 2)
+            output = F.conv1d(F.pad(ba, expanded_padding, mode='circular'),
+                            bw, self.bias, self.stride,
+                            _single(0), self.dilation, self.groups)
+        else:
+            output = F.conv1d(ba, bw, self.bias, self.stride,
+                            self.padding, self.dilation, self.groups)
+
+
+        return output
+                     
+class NoiseBiConv1dLSR(torch.nn.Conv1d):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1,
+                 padding=0, dilation=1, groups=1,
+                 bias=True, padding_mode='zeros', noise=0):
+        super(NoiseBiConv1dLSR, self).__init__(
+            in_channels, out_channels, kernel_size, stride, padding, dilation,
+            groups, bias, padding_mode)
+        self.register_parameter('scale', Parameter(torch.tensor(0.1)))
+        self.noise = noise
+        # self.conv = nn.Conv2d(in)
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        # self.sample_noise = sample_noise
+        
+
+    def reset_scale(self, input):
+        bw = self.weight
+        ba = input
+        bw = bw - bw.mean()
+        if self.padding_mode == 'circular':
+            expanded_padding = ((self.padding[0] + 1) // 2, self.padding[0] // 2)
+            self.scale = Parameter((F.conv1d(F.pad(ba, expanded_padding, mode='circular'),\
+                                  bw, self.bias, self.stride,\
+                                  _single(0), self.dilation, self.groups).std() / \
+                F.conv1d(torch.sign(F.pad(ba, expanded_padding, mode='circular')),\
+                         torch.sign(bw), self.bias, self.stride,\
+                         _single(0), self.dilation, self.groups).std()).float().to(ba.device))
+        else:
+            self.scale = Parameter((F.conv1d(ba, bw, self.bias, self.stride, self.padding, self.dilation, self.groups).std() \
+                                   / F.conv1d(torch.sign(ba), torch.sign(bw), self.bias, self.stride, self.padding, self.dilation, self.groups).std()).float().to(ba.device))
+
+
+    def forward(self, input):
+        bw = self.weight
+        ba = input
+        bw = bw - bw.mean()
+        if self.scale is Parameter(torch.tensor(0.1)):
+            self.reset_scale(input)
+        bw = BinaryQuantize().apply(bw)
+        # ba = BinaryQuantize().apply(ba)
+
+        bw = bw * self.scale
+
+        if self.padding_mode == 'circular':
+            expanded_padding = ((self.padding[0] + 1) // 2, self.padding[0] // 2)
+            output = F.conv1d(F.pad(ba, expanded_padding, mode='circular'),
+                            bw, self.bias, self.stride,
+                            _single(0), self.dilation, self.groups)
+        else:
+            output = F.conv1d(ba, bw, self.bias, self.stride,
+                            self.padding, self.dilation, self.groups)
+
+        if self.noise:
+            output = output + self.noised_forward(input, bw,d=1)
+
+        return output
+
+
+class NoiseTriConv2dLSR(torch.nn.Conv2d):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1,
+                 padding=0, dilation=1, groups=1,
+                 bias=True, padding_mode='zeros', noise=0):
+        super(NoiseTriConv2dLSR, self).__init__(
+            in_channels, out_channels, kernel_size, stride, padding, dilation,
+            groups, bias, padding_mode)
+        self.register_parameter('scale', Parameter(torch.tensor(0.1)))
+        self.noise = noise
+        # self.conv = nn.Conv2d(in)
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        # self.sample_noise = sample_noise
+        
+
+    def reset_scale(self, input):
+        bw = self.weight
+        ba = input
+        bw = bw - bw.mean()
+        if self.padding_mode == 'circular':
+            expanded_padding = ((self.padding[0] + 1) // 2, self.padding[0] // 2)
+            self.scale = Parameter((F.conv2d(F.pad(ba, expanded_padding, mode='circular'),\
+                                  bw, self.bias, self.stride,\
+                                  _single(0), self.dilation, self.groups).std() / \
+                F.conv2d(torch.sign(F.pad(ba, expanded_padding, mode='circular')),\
+                         torch.sign(bw), self.bias, self.stride,\
+                         _single(0), self.dilation, self.groups).std()).float().to(ba.device))
+        else:
+            self.scale = Parameter((F.conv2d(ba, bw, self.bias, self.stride, self.padding, self.dilation, self.groups).std() \
+                                   / F.conv2d(torch.sign(ba), torch.sign(bw), self.bias, self.stride, self.padding, self.dilation, self.groups).std()).float().to(ba.device))
+
+
+    def forward(self, input):
+        bw = self.weight
+        ba = input
+        bw = bw - bw.mean()
+        if self.scale is Parameter(torch.tensor(0.1)):
+            self.reset_scale(input)
+        bw = TernaryQuantize().apply(bw)
+        # ba = BinaryQuantize().apply(ba)
+
+        bw = bw * self.scale
+
+        if self.padding_mode == 'circular':
+            expanded_padding = ((self.padding[0] + 1) // 2, self.padding[0] // 2)
+            output = F.conv2d(F.pad(ba, expanded_padding, mode='circular'),
+                            bw, self.bias, self.stride,
+                            _single(0), self.dilation, self.groups)
+        else:
+            output = F.conv2d(ba, bw, self.bias, self.stride,
+                            self.padding, self.dilation, self.groups)
+
+        if self.noise:
+            output = output + self.noised_forward(input, bw,d=2)
+
+        return output
+
+
+class NoiseTriConv1dLSR(torch.nn.Conv1d):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1,
+                 padding=0, dilation=1, groups=1,
+                 bias=True, padding_mode='zeros', noise=0):
+        super(NoiseTriConv1dLSR, self).__init__(
+            in_channels, out_channels, kernel_size, stride, padding, dilation,
+            groups, bias, padding_mode)
+        self.register_parameter('scale', Parameter(torch.tensor(0.1)))
+        self.noise = noise
+        # self.conv = nn.Conv2d(in)
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        # self.sample_noise = sample_noise
+        
+
+    def reset_scale(self, input):
+        bw = self.weight
+        ba = input
+        bw = bw - bw.mean()
+        if self.padding_mode == 'circular':
+            expanded_padding = ((self.padding[0] + 1) // 2, self.padding[0] // 2)
+            self.scale = Parameter((F.conv1d(F.pad(ba, expanded_padding, mode='circular'),\
+                                  bw, self.bias, self.stride,\
+                                  _single(0), self.dilation, self.groups).std() / \
+                F.conv1d(torch.sign(F.pad(ba, expanded_padding, mode='circular')),\
+                         torch.sign(bw), self.bias, self.stride,\
+                         _single(0), self.dilation, self.groups).std()).float().to(ba.device))
+        else:
+            self.scale = Parameter((F.conv1d(ba, bw, self.bias, self.stride, self.padding, self.dilation, self.groups).std() \
+                                   / F.conv1d(torch.sign(ba), torch.sign(bw), self.bias, self.stride, self.padding, self.dilation, self.groups).std()).float().to(ba.device))
+
+
+    def forward(self, input):
+        bw = self.weight
+        ba = input
+        bw = bw - bw.mean()
+        if self.scale is Parameter(torch.tensor(0.1)):
+            self.reset_scale(input)
+        bw = TernaryQuantize().apply(bw)
+        # ba = BinaryQuantize().apply(ba)
+
+        bw = bw * self.scale
+
+        if self.padding_mode == 'circular':
+            expanded_padding = ((self.padding[0] + 1) // 2, self.padding[0] // 2)
+            output = F.conv1d(F.pad(ba, expanded_padding, mode='circular'),
+                            bw, self.bias, self.stride,
+                            _single(0), self.dilation, self.groups)
+        else:
+            output = F.conv1d(ba, bw, self.bias, self.stride,
+                            self.padding, self.dilation, self.groups)
+
+        if self.noise:
+            output = output + self.noised_forward(input, bw,d=1)
+
+        return output
+
+def noised_forward(self, x, weight,d=2):
+    x = x.detach()
+    batch_size, in_features, nsamples, npoints = x.size()
+    #x = x.reshape(-1, in_features, 1, 1)
+
+    origin_weight = weight
+    x_new = torch.zeros(batch_size,self.out_channels,nsamples, npoints)
+
+    """
+    for i in range(x.shape[0]):
+        noise_weight = gen_noise(weight, self.noise).detach()
+        noise_weight = noise_weight.squeeze()
+        # x_i =  x[i, :, :, :].squeeze(-1)
+        x_i =  x[i, :, :, :].unsqueeze(0)
+        # x_i = torch.matmul(noise_weight, x_i)
+        x_i = F.conv2d(x_i, weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
+        x_new[i, :, :, :] = x_i.squeeze(0)
+        del noise_weight, x_i
+    """
+    single_weight = origin_weight.clone().detach()
+    batch_weight = single_weight.repeat(1,1,nsamples, npoints)
+    noise_weight= gen_noise(single_weight, self.noise).detach()
+    
+    for i in range(batch_size):
+      x_i = x[i, :, :, :]
+      x_i = x_i.unsqueeze(0)
+      if d == 1:
+        x_i = F.conv1d(x_i, noise_weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
+      elif d==2:
+        x_i = F.conv2d(x_i, noise_weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
+      x_new[i, :, :, :] = x_i
+      del x_i
+    
+    del noise_weight
+    #x_new = x_new.reshape(batch_size, self.out_channels, nsamples, npoints)
+    return x_new.to(x.device).detach()
+
+class TriLinear(torch.nn.Linear):
+    def __init__(self, in_features, out_features, bias=True, binary_act=False,noise=0):
+        super(TriLinear, self).__init__(in_features, out_features, bias=bias)
+        self.output_ = None
+
+    def forward(self, input):
+        tw = self.weight
+        ta = input
+        tw = TernaryQuantize().apply(tw)
+        output = F.linear(ta, tw, self.bias)
+        self.output_ = output
+        return output
 
 class TriConv2d(torch.nn.Conv2d):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1,
                  padding=0, dilation=1, groups=1,
-                 bias=True, padding_mode='zeros'):
+                 bias=True, padding_mode='zeros',noise=0):
         super(TriConv2d, self).__init__(
             in_channels, out_channels, kernel_size, stride, padding, dilation,
             groups, bias, padding_mode)
@@ -570,3 +1184,4 @@ class TriConv2d(torch.nn.Conv2d):
                             _single(0), self.dilation, self.groups)
         return F.conv2d(ba, bw, self.bias, self.stride,
                         self.padding, self.dilation, self.groups)
+

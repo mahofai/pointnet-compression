@@ -11,7 +11,7 @@ from torch.nn.utils import prune
 from noise_layers import NoiseModule, NoiseConv, NoiseLinear
 from binary_utils import BiConv2dLSR, BiLinearLSR, TriConv2d, TriLinear, NoiseBiConv2dLSR
 from models.pointnet2_utils import PointNetSetAbstraction
-
+from models.pointnet_utils import PointNetEncoder, feature_transform_reguliarzer
 
 def prune_model_l2_structured(model,c_prune_rate,n=2,dim=1):
   proportion = 1-(1/c_prune_rate)
@@ -68,12 +68,17 @@ def prune_model_l1_structured(model,c_prune_rate):
 
   return model
 
-def prune_model_global_unstructured(model,proportion):
+def prune_model_global_unstructured(model,c_prune_rate):
+    proportion = 1-(1/c_prune_rate)
     module_tups = []
     for module in model.modules():
         if isinstance(module, nn.Linear):
             module_tups.append((module, 'weight'))
         if isinstance(module, nn.Conv1d):
+            module_tups.append((module, 'weight'))
+        if isinstance(module, nn.BatchNorm1d):
+            module_tups.append((module, 'weight'))
+        if isinstance(module, PointNetEncoder):
             module_tups.append((module, 'weight'))
 
     prune.global_unstructured(

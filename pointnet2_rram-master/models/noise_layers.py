@@ -1,6 +1,8 @@
 from typing import OrderedDict
 import torch
 import torch.nn as nn
+import numpy as np
+import torch.nn.functional as F
 
 
 class NoiseModule(nn.Module):
@@ -35,7 +37,7 @@ class NoiseLinear(NoiseModule):
         #     return self.linear(x) + self.noised_foward(x)
         # else:
         #     return self.linear(x) + self.noised_inference(x)
-        else:
+        else: 
             return self.linear(x) + self.noised_forward(x)
 
     def noised_inference(self, x):
@@ -83,7 +85,7 @@ class NoiseConv(NoiseModule):
         self.sample_noise = sample_noise
 
     def forward(self, x):
-        if not self.noise:
+        if not self.noise:          
             return self.conv(x)
         else:
             return self.conv(x) + self.noised_forward(x)
@@ -95,6 +97,7 @@ class NoiseConv(NoiseModule):
         x = x.reshape(batch, self.in_channels, -1, 1).squeeze() # [channel, number of points]
         x_new = torch.zeros(batch, self.out_channels, x.shape[2], 1).to(x.device)
         for i in range(batch):
+            print(i)
             noised_weight = self.gen_noise(origin_weight, self.noise).detach()
 
             x_i = torch.matmul(noised_weight, x[i])
@@ -107,34 +110,71 @@ class NoiseConv(NoiseModule):
         '''
         forward propagation with noise
         '''
-        x = x.detach()
 
         # x shape: (batch_size, in_features, nsamples, npoints)
         # n_points: number of centroids.
         # nsamples: number of points in the neigbor of each centroid.
         batch_size, in_features, nsamples, npoints = x.size()
         # x = x.reshape(1, in_features, 1, -1)
-        x = x.reshape(-1, in_features, 1, 1)
+        #x = x.reshape(-1, in_features, 1, 1)
 
         origin_weight = self.conv.weight
-        x_new = torch.zeros(x.shape[0], self.out_channels, 1, 1)
-
-        for i in range(x.shape[0]):
-            noise_weight= self.gen_noise(origin_weight, self.noise).detach()#.suqeeze()# .detach()
-            noise_weight = noise_weight.squeeze()
-            # noise_conv = noise_weight
+        #x_new = torch.zeros(x.shape[0], self.out_channels, 1, 1)
+        x_new = torch.zeros(batch_size,self.out_channels,nsamples, npoints)
+        
+        #for i in range(x.shape[0]):
+        #    noise_weight= self.gen_noise(origin_weight, self.noise).detach()#.suqeeze()# .detach()
+        #    noise_weight = noise_weight.squeeze()
+        #    # noise_conv = noise_weight
             # del noise_weight
-            x_i = x[i, :, :, :].squeeze(-1)#.unsqueeze(-1)
-            x_i = torch.matmul(noise_weight, x_i)
-            x_new[i, :, :, :] = x_i.unsqueeze(-1)    # (batch_size, out_features)
-            del noise_weight, x_i
+        #    x_i = x[i, :, :, :].squeeze(-1)#.unsqueeze(-1)
+        #    x_i = torch.matmul(noise_weight, x_i)
+        #    x_new[i, :, :, :] = x_i.unsqueeze(-1)    # (batch_size, out_features)
+        #    del noise_weight, x_i
+        """
+        weight_list = []
+        for i in range(batch_size):
+          single_weight = origin_weight.clone().detach()
+          weight_list.append(single_weight)
+          del single_weight
+        batch_weight = torch.stack(weight_list ,dim=0)
+        noise_weight= self.gen_noise(batch_weight, self.noise).detach()
+        noise_weight=noise_weight.squeeze()
+        noise_weight=noise_weight.unsqueeze(1)
 
-        x_new = x_new.reshape(batch_size, self.out_channels, nsamples, npoints)
+        x_1 = x[0, :, :, :]
+        x_1 = x_1.unsqueeze(0)
+        x_1 = x_1.reshape(-1, in_features, 1, 1)
+        x_1 = x_1.unsqueeze(0)
+        x_1 = x_1.squeeze(-1)
+        x_new = torch.matmul(noise_weight, x_1)
+        del weight_list
+        """
+        
+        single_weight = origin_weight.clone().detach()
+        batch_weight = single_weight.repeat(1,1,nsamples, npoints)
+        noise_weight= self.gen_noise(batch_weight, self.noise).detach()
+        #print("noise_weight",np.shape(noise_weight))
+
+        
+        for i in range(batch_size):
+          x_i = x[i, :, :, :]
+          x_i = x_i.unsqueeze(0)
+          x_i = F.conv2d(x_i,noise_weight)
+          #print("conv_x_1",np.shape(x_i))
+          x_new[i, :, :, :] = x_i
+          del x_i
+        
+        #print("x_new",np.shape(x_new))
+        del noise_weight
+            
+
+        #x_new = x_new.reshape(batch_size, self.out_channels, nsamples, npoints)
         return x_new.to(x.device).detach()
 
-class NoiseConv1(NoiseModule):
+class NoiseConv1d(NoiseModule):
     def __init__(self, in_channels, out_channels, kernel_size=1, sample_noise=False, noise=0):
-        super(NoiseConv1, self).__init__()
+        super(NoiseConv1d, self).__init__()
         self.noise = noise
         self.conv = nn.Conv1d(in_channels, out_channels, kernel_size)
         self.in_channels = in_channels
@@ -155,7 +195,6 @@ class NoiseConv1(NoiseModule):
         x_new = torch.zeros(batch, self.out_channels, x.shape[2], 1).to(x.device)
         for i in range(batch):
             noised_weight = self.gen_noise(origin_weight, self.noise).detach()
-
             x_i = torch.matmul(noised_weight, x[i])
             x_new[i] = x_i.unsqueeze(-1)
         del noised_weight, x_i
@@ -217,6 +256,7 @@ class OldNoiseLinear(NoiseModule):
         origin_weight = self.linear.weight
         # x_new = torch.zeros(self.out_features, batch_size*n_points).to(x.device)
         x_new = torch.zeros(batch_size, self.out_features).to(x.device)
+
 
         for i in range(x.shape[0]):
             self.linear.weight = self.add_noise(origin_weight, self.noise)

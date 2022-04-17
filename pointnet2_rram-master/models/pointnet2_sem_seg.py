@@ -1,44 +1,66 @@
 import torch.nn as nn
 import torch.nn.functional as F
 from models.pointnet2_utils import PointNetSetAbstraction,PointNetFeaturePropagation
-from noise_layers import NoiseModule, NoiseConv, NoiseLinear
-from binary_utils import BiLinearLSR, TriLinear, NoiseBiLinear, BiMLP, BiLinear,BiConv1d
+from noise_layers import NoiseModule, NoiseConv, NoiseLinear,NoiseConv1d
+from binary_utils import NoiseBiLinearLSR, BiLinearLSR, NoiseTriLinear, NoiseBiLinear, BiMLP, BiLinear, NoiseTriConv1d,NoiseBiConv1dLSR
+from kmeans import kmeans_clustering, KmeansLinear, KmeansConv1d
 
+class Conv1dLSR(nn.Module):
+    def __init__(self, inplane, outplane):
+        super().__init__()
+        self.lin = NoiseBiLinearLSR(inplane, outplane)
+
+    def forward(self, x):
+        B, C, N = x.shape
+        x = x.permute(0, 2, 1).contiguous().view(-1, C)
+        x = self.lin(x).view(B, N, -1).permute(0, 2, 1).contiguous()
+        return x
 
 class get_model(nn.Module):
-    def __init__(self, num_classes, c_prune_rate=1, noise=0, compression='full'):
+    def __init__(self, num_classes, c_prune_rate=1, noise=0, compression='full',pool='ema-max',bits=1,drop=0):
         super(get_model, self).__init__()
-        mlp1 = [32, 32, 64]
-        mlp2 = [64, 64, 128]
-        mlp3 = [128, 128, 256]
-        mlp4 = [256, 256, 512]
+        #mlp1 = [32, 32, 64]
+        #mlp2 = [64, 64, 128]
+        #mlp3 = [128, 128, 256]
+        #mlp4 = [256, 256, 512]
+        mlp1 = [64, 64, 64]
+        mlp2 = [128, 128, 128, 128]
+        mlp3 = [256, 256, 256, 256]
+        mlp4 = [512]
         if c_prune_rate != 1:
             mlp1 = [int(c / c_prune_rate) for c in mlp1]
             mlp2 = [int(c / c_prune_rate) for c in mlp2]
             mlp3 = [int(c / c_prune_rate) for c in mlp3]
             mlp4 = [int(c / c_prune_rate) for c in mlp4] 
 
-        self.sa1 = PointNetSetAbstraction(1024, 0.1, 32, 9 + 3, mlp1, False)
-        self.sa2 = PointNetSetAbstraction(256, 0.2, 32, int(64/c_prune_rate) + 3, mlp2, False, noise=noise)
-        self.sa3 = PointNetSetAbstraction(64, 0.4, 32, int(128/c_prune_rate) + 3, mlp3, False, noise=noise)
-        self.sa4 = PointNetSetAbstraction(16, 0.8, 32, int(256/c_prune_rate) + 3, mlp4, False, noise=noise)
-        self.fp4 = PointNetFeaturePropagation( int(768 / c_prune_rate), [int(256 / c_prune_rate), int(256 / c_prune_rate)])
-        self.fp3 = PointNetFeaturePropagation( int(384 / c_prune_rate), [int(256 / c_prune_rate), int(256 / c_prune_rate)])
-        self.fp2 = PointNetFeaturePropagation( int(320 / c_prune_rate), [int(256 / c_prune_rate), int(128 / c_prune_rate)])
-        self.fp1 = PointNetFeaturePropagation( int(128 / c_prune_rate), [int(128 / c_prune_rate), int(128 / c_prune_rate), int(128 / c_prune_rate)])
+        self.sa1 = PointNetSetAbstraction(1024, 0.1, 32, 9 + 3, mlp1, False, noise=noise, compression=compression,drop=drop)
+        self.sa2 = PointNetSetAbstraction(256, 0.2, 32, int(64/c_prune_rate) + 3, mlp2, False, noise=noise, compression=compression,bits=bits,drop=drop)
+        self.sa3 = PointNetSetAbstraction(64, 0.4, 32, int(128/c_prune_rate) + 3, mlp3, False, noise=noise, compression=compression,bits=bits,drop=drop)
+        self.sa4 = PointNetSetAbstraction(16, 0.8, 32, int(256/c_prune_rate) + 3, mlp4, False, noise=noise, compression=compression,bits=bits,drop=drop)
+        self.fp4 = PointNetFeaturePropagation( int(768 / c_prune_rate), [int(256 / c_prune_rate), int(256 / c_prune_rate)],compression=compression,bits=bits,drop=drop)
+        self.fp3 = PointNetFeaturePropagation( int(384 / c_prune_rate), [int(256 / c_prune_rate), int(256 / c_prune_rate)],compression=compression,bits=bits,drop=drop)
+        self.fp2 = PointNetFeaturePropagation( int(320 / c_prune_rate), [int(256 / c_prune_rate), int(128 / c_prune_rate)],compression=compression,bits=bits,drop=drop)
+        self.fp1 = PointNetFeaturePropagation( int(128 / c_prune_rate), [int(128 / c_prune_rate), int(128 / c_prune_rate), int(128 / c_prune_rate)],compression=compression,bits=bits,drop=drop)
 
 
         if compression == 'full':
-            self.conv1 = nn.Conv1d(int(128 / c_prune_rate), int(128 / c_prune_rate), 1)
-            self.conv2 = nn.Conv1d(int(128 / c_prune_rate), num_classes, 1)
+            self.conv1 = NoiseConv1d(int(128 / c_prune_rate), int(128 / c_prune_rate), 1,noise=noise,)
+            self.conv2 = NoiseConv1d(int(128 / c_prune_rate), num_classes, 1,noise=noise,)
 
         elif compression == 'binary':
-            self.conv1 = BiConv1d(int(128 / c_prune_rate), int(128 / c_prune_rate), 1)
-            self.conv2 = BiConv1d(int(128 / c_prune_rate), num_classes, 1)
+            print("BiConv1d")
+            self.conv1 = Conv1dLSR(int(128 / c_prune_rate), int(128 / c_prune_rate))
+            self.conv2 = Conv1dLSR(int(128 / c_prune_rate), num_classes)
 
         elif compression == 'ternary':
-            self.conv1 = TriLinear(int(128 / c_prune_rate), int(128 / c_prune_rate))
-            self.conv2 = TriLinear(int(128 / c_prune_rate), num_classes)
+            print("tenConv1d")
+            self.conv1 =  NoiseTriConv1d(int(128 / c_prune_rate), int(128 / c_prune_rate), 1, noise=noise,)
+            self.conv2 =  NoiseTriConv1d(int(128 / c_prune_rate), num_classes, 1,noise=noise,)
+
+        elif compression == 'kmeans':
+            print("kmeansConv1d")
+            self.conv1 =  KmeansConv1d(int(128 / c_prune_rate), int(128 / c_prune_rate), 1,bits=bits,)
+            self.conv2 =  KmeansConv1d(int(128 / c_prune_rate), num_classes, 1,bits=bits,)
 
         #self.conv1 = nn.Conv1d(int(128 / c_prune_rate), int(128 / c_prune_rate), 1)
         self.bn1 = nn.BatchNorm1d(int(128 / c_prune_rate))
@@ -48,6 +70,8 @@ class get_model(nn.Module):
 
         self.noise = noise
         self.c_prune_rate = c_prune_rate
+        self.dropAll=  nn.Dropout(drop)
+        
 
     def forward(self, xyz):
         l0_points = xyz
@@ -63,8 +87,8 @@ class get_model(nn.Module):
         l1_points = self.fp2(l1_xyz, l2_xyz, l1_points, l2_points)
         l0_points = self.fp1(l0_xyz, l1_xyz, None, l1_points)
 
-        x = self.drop1(F.relu(self.bn1(self.conv1(l0_points))))
-        x = self.conv2(x)
+        x = self.dropAll(self.drop1(F.relu(self.bn1(self.conv1(l0_points)))))
+        x = self.dropAll(self.conv2(x))
         x = F.log_softmax(x, dim=1)
         x = x.permute(0, 2, 1)
         return x, l4_points

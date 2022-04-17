@@ -33,12 +33,12 @@ class get_model(NoiseModule):
             #mlp3 = [int(c / c_prune_rate) for c in mlp3]
             # mlp4 = [int(c / c_prune_rate) for c in mlp4]
 
-        self.sa1 = Prune_PointNetSetAbstraction(
-            npoint=512, radius=0.2, nsample=32, in_channel=in_channel, mlp=mlp1, group_all=False, noise=noise, compression=compression, c_prune_rate=c_prune_rate)
-        self.sa2 = Prune_PointNetSetAbstraction(
-            npoint=128, radius=0.4, nsample=64, in_channel=128 + 3, mlp=mlp2, group_all=False, noise=noise, compression=compression, c_prune_rate=c_prune_rate)
-        self.sa3 = Prune_PointNetSetAbstraction(
-            npoint=None, radius=None, nsample=None, in_channel=256 + 3, mlp=mlp3, group_all=True, noise=noise, compression=compression, c_prune_rate=c_prune_rate)
+        self.sa1 = PointNetSetAbstraction(
+            npoint=512, radius=0.2, nsample=32, in_channel=in_channel, mlp=mlp1, group_all=False, noise=noise, compression=compression,)
+        self.sa2 = PointNetSetAbstraction(
+            npoint=128, radius=0.4, nsample=64, in_channel=128 + 3, mlp=mlp2, group_all=False, noise=noise, compression=compression,)
+        self.sa3 = PointNetSetAbstraction(
+            npoint=None, radius=None, nsample=None, in_channel=256 + 3, mlp=mlp3, group_all=True, noise=noise, compression=compression,)
 
 
         # try recurrent

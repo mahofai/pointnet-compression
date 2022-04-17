@@ -3,19 +3,23 @@ import torch.nn as nn
 import torch.nn.functional as F
 from pointnet2_utils import PointNetSetAbstraction
 from noise_layers import NoiseModule, NoiseConv, NoiseLinear
-from binary_utils import BiLinearLSR, TriLinear, NoiseBiLinear, BiMLP, BiLinear
+from binary_utils import NoiseBiLinearLSR,TriLinear, BiLinearLSR, NoiseTriLinear, NoiseBiLinear, BiMLP, BiLinear, BiLinearXNOR, NoiseTriLinearLSR
+from kmeans import kmeans_clustering, KmeansLinear
 
-
+offset_map = {
+  64: -2.2983,
+  1024: -3.2041
+}
 
 
 class get_model(NoiseModule):
-    def __init__(self, num_class, normal_channel=True, c_prune_rate=1, noise=0, compression='full',BiLinear=BiLinear):
+    def __init__(self, num_class, normal_channel=True, c_prune_rate=1, noise=0, compression='full',bilinear='BiLinear',pool='ema-max',bits=1,drop=0):
         super(get_model, self).__init__()
         in_channel = 6 if normal_channel else 3
         self.normal_channel = normal_channel
-        # mlp1 = [64, 64, 128]
-        # mlp2 = [128, 128, 256]
-        # mlp3 = [256, 512, 1024]
+        #mlp1 = [64, 64, 128]
+        #mlp2 = [128, 128, 256]
+        #mlp3 = [256, 512, 1024]
 
         # try recurrent
         mlp1 = [128, 128, 128, 128]
@@ -31,11 +35,11 @@ class get_model(NoiseModule):
             mlp3 = [int(c / c_prune_rate) for c in mlp3]
             # mlp4 = [int(c / c_prune_rate) for c in mlp4]
         self.sa1 = PointNetSetAbstraction(
-            npoint=512, radius=0.2, nsample=32, in_channel=in_channel, mlp=mlp1, group_all=False, noise=noise, compression=compression)
+            npoint=512, radius=0.2, nsample=32, in_channel=in_channel, mlp=mlp1, group_all=False, noise=noise, compression=compression, bilinear=bilinear,pool=pool, bits=bits,drop=drop)
         self.sa2 = PointNetSetAbstraction(
-            npoint=128, radius=0.4, nsample=64, in_channel=int(128/c_prune_rate) + 3, mlp=mlp2, group_all=False, noise=noise, compression=compression)
+            npoint=128, radius=0.4, nsample=64, in_channel=int(128/c_prune_rate) + 3, mlp=mlp2, group_all=False, noise=noise, compression=compression, bilinear=bilinear,pool=pool,bits=bits,drop=drop)
         self.sa3 = PointNetSetAbstraction(
-            npoint=None, radius=None, nsample=None, in_channel=int(256/c_prune_rate) + 3, mlp=mlp3, group_all=True, noise=noise, compression=compression)
+            npoint=None, radius=None, nsample=None, in_channel=int(256/c_prune_rate) + 3, mlp=mlp3, group_all=True, noise=noise, compression=compression, bilinear=bilinear,pool=pool,bits=bits,drop=drop)
 
         # try recurrent
         # self.sa4 = PointNetSetAbstraction(
@@ -45,21 +49,39 @@ class get_model(NoiseModule):
             self.fc1 = NoiseLinear(int(1024 / c_prune_rate), int(512 / c_prune_rate), noise=noise)
             self.fc2 = NoiseLinear(int(512 / c_prune_rate), int(256 / c_prune_rate), noise=noise)
             self.fc3 = nn.Linear(int(256 / c_prune_rate), num_class)
-        elif compression == 'binary':
+        if compression == 'binary':
             self.fc1 = NoiseBiLinear(int(1024 / c_prune_rate), int(512 / c_prune_rate), binary_act=False, noise=noise)
             self.fc2 = NoiseBiLinear(int(512 / c_prune_rate), int(256 / c_prune_rate), binary_act=False, noise=noise)
-            self.fc3 = NoiseBiLinear(int(256 / c_prune_rate), num_class, binary_act=False, noise=noise)
+            self.fc3 = NoiseBiLinear(int(256 / c_prune_rate), num_class, binary_act=False)
+        if compression == 'binary' and bilinear=='BiLinearLSR':
+            self.fc1 = NoiseBiLinearLSR(int(1024 / c_prune_rate), int(512 / c_prune_rate), binary_act=False,noise=noise )
+            self.fc2 = NoiseBiLinearLSR(int(512 / c_prune_rate), int(256 / c_prune_rate), binary_act=False,noise=noise )
+            self.fc3 = NoiseBiLinearLSR(int(256 / c_prune_rate), num_class, binary_act=False )       
         elif compression == 'ternary':
-            self.fc1 = TriLinear(int(1024 / c_prune_rate), int(512 / c_prune_rate))
-            self.fc2 = TriLinear(int(512 / c_prune_rate), int(256 / c_prune_rate))
-            self.fc3 = TriLinear(int(256 / c_prune_rate), num_class)
+            self.fc1 = NoiseTriLinear(int(1024 / c_prune_rate), int(512 / c_prune_rate), noise=noise)
+            self.fc2 = NoiseTriLinear(int(512 / c_prune_rate), int(256 / c_prune_rate), noise=noise)
+            self.fc3 = NoiseTriLinear(int(256 / c_prune_rate), num_class)
+        elif compression == 'ternaryLSR':
+            self.fc1 = NoiseTriLinear(int(1024 / c_prune_rate), int(512 / c_prune_rate), noise=noise)
+            self.fc2 = NoiseTriLinear(int(512 / c_prune_rate), int(256 / c_prune_rate), noise=noise)
+            self.fc3 = NoiseTriLinear(int(256 / c_prune_rate), num_class)
+        elif compression == 'kmeans':
+            print("bits",bits)
+            #self.fc1 = kmeans_clustering(NoiseLinear(int(1024 / c_prune_rate), int(512 / c_prune_rate), noise=noise))
+            #self.fc2 = kmeans_clustering(NoiseLinear(int(512 / c_prune_rate), int(256 / c_prune_rate), noise=noise))
+            self.fc1 = KmeansLinear(int(1024 / c_prune_rate), int(512 / c_prune_rate), noise=noise,bits=bits)
+            self.fc2 = KmeansLinear(int(512 / c_prune_rate), int(256 / c_prune_rate), noise=noise,bits=bits)
+            self.fc3 = nn.Linear(int(256 / c_prune_rate), num_class)
         self.bn1 = nn.BatchNorm1d(int(512 / c_prune_rate))
         self.drop1 = nn.Dropout(0.4)
         self.bn2 = nn.BatchNorm1d(int(256 / c_prune_rate))
         self.drop2 = nn.Dropout(0.4)
 
+        self.dropAll=  nn.Dropout(drop)
+
         self.noise = noise
         self.c_prune_rate = c_prune_rate
+        self.drop=drop
 
     def forward(self, xyz):
         B, _, _ = xyz.shape
@@ -85,9 +107,10 @@ class get_model(NoiseModule):
         # l3_xyz, l3_points = self.sa4(l3_xyz, l3_points)
 
         x = l3_points.view(B, int(1024 / self.c_prune_rate))
-        x = self.drop1(F.relu(self.bn1(self.fc1(x))))
-        x = self.drop2(F.relu(self.bn2(self.fc2(x))))
-        x = self.fc3(x)
+        
+        x = self.dropAll(self.drop1(F.relu(self.bn1(self.fc1(x)))))
+        x = self.dropAll(self.drop2(F.relu(self.bn2(self.fc2(x)))))
+        x = self.dropAll(self.fc3(x))
         x = F.log_softmax(x, -1)
         return x, l3_points
 
@@ -100,5 +123,3 @@ class get_loss(nn.Module):
         total_loss = F.nll_loss(pred, target)
 
         return total_loss
-
-
